@@ -3,6 +3,7 @@ import json
 import os
 import os.path
 import webbrowser
+import numpy as np
 from typing import Optional, Tuple
 
 from elementary.clients.azure.client import AzureClient
@@ -15,6 +16,7 @@ from elementary.monitor.api.report.report import ReportAPI
 from elementary.monitor.api.report.schema import ReportDataSchema
 from elementary.monitor.api.tests.tests import TestsAPI
 from elementary.monitor.data_monitoring.data_monitoring import DataMonitoring
+from elementary.monitor.data_monitoring.report import serialization_utils
 from elementary.monitor.data_monitoring.report.slack_report_summary_message_builder import (
     SlackReportSummaryMessageBuilder,
 )
@@ -38,18 +40,12 @@ class DataMonitoringReport(DataMonitoring):
         force_update_dbt_package: bool = False,
         disable_samples: bool = False,
     ):
-        super().__init__(
-            config, tracking, force_update_dbt_package, disable_samples, selector_filter
-        )
+        super().__init__(config, tracking, force_update_dbt_package, disable_samples, selector_filter)
         self.report_api = ReportAPI(self.internal_dbt_runner)
         self.s3_client = S3Client.create_client(self.config, tracking=self.tracking)
         self.gcs_client = GCSClient.create_client(self.config, tracking=self.tracking)
-        self.azure_client = AzureClient.create_client(
-            self.config, tracking=self.tracking
-        )
-        self.slack_client = SlackClient.create_client(
-            self.config, tracking=self.tracking
-        )
+        self.azure_client = AzureClient.create_client(self.config, tracking=self.tracking)
+        self.slack_client = SlackClient.create_client(self.config, tracking=self.tracking)
 
     def generate_report(
         self,
@@ -74,7 +70,7 @@ class DataMonitoringReport(DataMonitoring):
         with open(template_html_path, "r", encoding="utf-8") as template_html_file:
             template_html_code = template_html_file.read()
 
-        dumped_output_data = json.dumps(output_data)
+        dumped_output_data = json.dumps(output_data, default=serialization_utils.turn_nan_or_infinity_to_str)
         encoded_output_data = base64.b64encode(dumped_output_data.encode("utf-8"))
         compiled_output_html = (
             f"<script>"
@@ -136,9 +132,7 @@ class DataMonitoringReport(DataMonitoring):
     def validate_report_selector(self):
         self.selector_filter.validate_report_selector()
 
-    def _add_report_tracking(
-        self, report_data: ReportDataSchema, error: Optional[Exception] = None
-    ):
+    def _add_report_tracking(self, report_data: ReportDataSchema, error: Optional[Exception] = None):
         if error:
             if self.tracking:
                 self.tracking.record_internal_exception(error)
@@ -150,23 +144,15 @@ class DataMonitoringReport(DataMonitoring):
                 test_metadatas.append(test.get("metadata"))
 
         self.execution_properties["elementary_test_count"] = len(
-            [
-                test_metadata
-                for test_metadata in test_metadatas
-                if test_metadata.get("test_type") != "dbt_test"
-            ]
+            [test_metadata for test_metadata in test_metadatas if test_metadata.get("test_type") != "dbt_test"]
         )
         self.execution_properties["test_result_count"] = len(test_metadatas)
 
-        if self.config.anonymous_tracking_enabled and isinstance(
-            self.tracking, AnonymousTracking
-        ):
+        if self.config.anonymous_tracking_enabled and isinstance(self.tracking, AnonymousTracking):
             report_data.tracking = dict(
                 posthog_api_key=self.tracking.POSTHOG_PROJECT_API_KEY,
                 report_generator_anonymous_user_id=self.tracking.anonymous_user_id,
-                anonymous_warehouse_id=self.warehouse_info.id
-                if self.warehouse_info
-                else None,
+                anonymous_warehouse_id=self.warehouse_info.id if self.warehouse_info else None,
             )
 
     def send_report(
@@ -209,9 +195,7 @@ class DataMonitoringReport(DataMonitoring):
 
         should_send_report_over_slack = True
         # If we upload the report to a bucket, we don't want to share it via Slack.
-        if (
-            upload_succeeded and bucket_website_url is not None
-        ) or disable_html_attachment:
+        if (upload_succeeded and bucket_website_url is not None) or disable_html_attachment:
             should_send_report_over_slack = False
 
         # If a Slack client is provided, we want to send a results summary and attachment of the report if needed.
@@ -232,9 +216,7 @@ class DataMonitoringReport(DataMonitoring):
 
     def send_report_attachment(self, local_html_path: str) -> bool:
         if self.slack_client:
-            send_succeeded = self.slack_client.send_report(
-                self.config.slack_channel_name, local_html_path
-            )
+            send_succeeded = self.slack_client.send_report(self.config.slack_channel_name, local_html_path)
             self.execution_properties["sent_to_slack_successfully"] = send_succeeded
             if not send_succeeded:
                 self.success = False
@@ -242,9 +224,7 @@ class DataMonitoringReport(DataMonitoring):
         self.execution_properties["success"] = self.success
         return self.success
 
-    def upload_report(
-        self, local_html_path: str, remote_file_path: Optional[str] = None
-    ) -> Tuple[bool, Optional[str]]:
+    def upload_report(self, local_html_path: str, remote_file_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         if self.gcs_client:
             send_succeeded, bucket_website_url = self.gcs_client.send_report(
                 local_html_path, remote_bucket_file_path=remote_file_path
@@ -289,9 +269,7 @@ class DataMonitoringReport(DataMonitoring):
         invocations_api = InvocationsAPI(
             dbt_runner=self.internal_dbt_runner,
         )
-        invocation = invocations_api.get_test_invocation_from_filter(
-            self.selector_filter.to_selector_filter_schema()
-        )
+        invocation = invocations_api.get_test_invocation_from_filter(self.selector_filter.to_selector_filter_schema())
         summary_test_results = tests_api.get_test_results_summary(
             filter=self.selector_filter.to_selector_filter_schema(),
             dbt_invocation=invocation,
@@ -312,9 +290,7 @@ class DataMonitoringReport(DataMonitoring):
         else:
             send_succeeded = False
 
-        self.execution_properties[
-            "sent_test_results_summary_successfully"
-        ] = send_succeeded
+        self.execution_properties["sent_test_results_summary_successfully"] = send_succeeded
         self.success = send_succeeded
 
         if send_succeeded:
